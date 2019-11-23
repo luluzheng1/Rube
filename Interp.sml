@@ -91,50 +91,49 @@ fun fresh_location () =
 	in !last_loc
 	end
 
-fun rubeval (e) = 
+fun rubeval e = 
   (case e
 	of (A, H, rv) => rv)
 
-fun extract_option (opt) =
+fun extract_option opt s =
   (case opt
-  	of NONE => raise Fail "Could not find object or rubevalue in env"
+  	of NONE => raise Halt s
   	 | (SOME v) => v)
 
-fun read_location (option_location) =
+fun read_location option_location =
   (case option_location
-  	 of NONE => raise Fail "self not bound in A"
+  	 of NONE => raise Halt "self not bound in A"
 	  | (SOME (RLOC n)) => n
-	  | (SOME _) => raise Fail "expects self to be RLOC") 
+	  | (SOME _) => raise Halt "expects self to be RLOC") 
 
+fun equal x y =
+	case (x = y)
+	  of true => RINT 1
+	  | false => RNIL
+		
 fun eval p (A, H, ENil) = (A, H, RNIL)
   | eval p (A, H, EInt n) = (A, H, RINT n)
-  | eval p (A, H, ESelf) = (A, H, extract_option (lookup "self" A))
+  | eval p (A, H, ESelf) = (A, H, extract_option (lookup "self" A) "Self not bound in A")
   | eval p (A, H, EString s) = (A, H, RSTR s)
   | eval p (A, H, ELocRd s) = 
 	let val option_var = lookup s A
-		val read_var =  
-		  (case option_var
-			 of NONE => raise Fail "id not bound in A"
-			  | (SOME v) => v)
+		val read_var = extract_option option_var "Id not bound in A"
 	in (A, H, read_var)
 	end
 
   | eval p (A, H, ELocWr (s, e)) = 
 	let val v = eval p (A, H, e)
-		val rv = rubeval (v)
+		val rv = rubeval v
 		val () = update A (s, rv)
 	in (A, H, rv)
 	end
 
   | eval p (A, H, EFldRd s) = 
 	let val option_location = lookup "self" A
-		val location = read_location (option_location)
+		val location = read_location option_location
 		  	  
 		val option_object = lookup location H
-		val read_object = 
-		  (case option_object
-		  	 of NONE => raise Fail "object not bound in H"
-		  	  | (SOME v) => v)
+		val read_object = extract_option option_object "Object not bound in H"
 
 		val {class = _, fields = fs} = read_object
 		val option_field = lookup s fs
@@ -147,26 +146,23 @@ fun eval p (A, H, ENil) = (A, H, RNIL)
 
   | eval p (A, H, EFldWr (s, e)) = 
   	let val option_location = lookup "self" A
-  		val location = read_location (option_location)
+  		val location = read_location option_location
 
   		val option_object = lookup location H
-  		val read_object = 
-  		  (case option_object
-  		  	 of NONE => raise Fail "object not bound in H"
-  		  	  | (SOME v) => v)
+  		val read_object = extract_option option_object "Object not bound in H"
 
   		val {class = _, fields = fs} = read_object
   	    val v = eval p (A, H, e)
-  		val rv = rubeval (v)
+  		val rv = rubeval v
   		val () = update fs (s, rv)
   	in (A, H, rv)
   	end 
 
   | eval p (A, H, EIf (e1, e2, e3)) =
   	let val guard = eval p (A, H, e1)
-  		val rubevalue = rubeval (guard)
+  		val rv = rubeval guard
   		val evaluate =
-  		  (case rubevalue
+  		  (case rv
   		  	 of RNIL => eval p (A, H, e2)
   		  	  | _ => eval p (A, H, e3))
   	in evaluate
@@ -182,82 +178,92 @@ fun eval p (A, H, ENil) = (A, H, RNIL)
   	let val has_class = 
   		  (case s
   		  	 of "nil" => raise Halt "Cannot instantiate Bot"
-  		  	  | _ => (defined_class p s))
-  		val location =
+  		  	  | _ => defined_class p s)
+
+  		val l =
   	      (case has_class
-  	      	 of true => fresh_location()
+  	      	 of true => fresh_location ()
   	      	  | false => raise Halt "No such class C")
-  	    val new_class = {class = s, fields = ref []}
-  	    val () = update H (location, new_class) (*update H with (location, object)*)
-  	in (A, H, (RLOC location))
+
+  	    val new_cls = {class = s, fields = ref []}
+  	    val () = update H (l, new_cls) (*update H with (location, object)*)
+  	in (A, H, (RLOC l))
   	end
-(* r_loc = rv
-   location = temp*)
+
   | eval p (A, H, EInvoke (e, s, es)) =
     let val rv = rubeval (eval p (A, H, e))
     	val vs = List.map (fn x => eval p (A, H, x)) es
-    	val r_vs = List.map (fn x => rubeval (x)) vs
+    	val r_vs = List.map (fn x => rubeval x) vs
     	
-    	val location = 
-    	  (case rv
-    	  	 of (RLOC n) => n
-    	  	  | _ => built_in(rv, s, vs))
-    	
+		(* Evaluate built methods*)
+		fun built_in receiver meth args =
+			let val value = 
+		  	  (case (receiver, meth, args)
+	  		 	 of (RINT n, "+", [RINT m]) => RINT (n+m)
+	   		  	  | (RINT n, "+", _) => raise Halt "non-Integer passed as argument"
+	   		  	  | (RSTR s, "+", [RSTR s']) => RSTR (s ^ s')
+	   		  	  | (RSTR s, "+", _) => raise Halt "non-String passed as argument"
+	   		  	  | (RINT n, "-", [RINT m]) => RINT (n-m)
+	   		  	  | (RINT n, "-", _) => raise Halt "non-Integer passed as argument"
+	   		  	  | (RINT n, "*", [RINT m]) => RINT (n*m)
+	   		  	  | (RINT n, "*", _) => raise Halt "non-Integer passed as argument"
+	   		  	  | (RINT n, "/", [RINT m]) => RINT (n div m)
+	   		  	  | (RINT n, "/", _) => raise Halt "non-Integer passed as argument"
+	   		  	  | (RINT n, "equal?", [RINT m]) => equal n m
+		  	  	  | (RLOC n, "equal?", [RLOC m]) => equal n m
+		  	  	  | (RSTR n, "equal?", [RSTR m]) => equal n m
+		  	  	  | (_, "equal?", _) => RNIL
+		  	  	  (* | (RSTR s, "to_s", []) => s
+		  	  	  | (RINT n, "to_s", []) => Int.toString n
+		  	  	  | (RNIL, "to_s", []) => "nil"
+		  	  	  | (RLOC n, "to_s", []) => raise Halt "Cannot stringify Object" *)
+		  	  	  | (_, _, _) => raise Halt "No such method") (* general dynamic dispatch case *)
+			in value
+			end
 
-    	val option_object = lookup location H (* returns an object *)
-    	val object = 
-		  (case option_object
-		  	 of NONE => raise Fail "object not bound in H"
-		  	  | (SOME v) => v)
-		val {class = cls, fields = _} = object (* get cls name from object*)
-		
-		val option_meth = lookup_meth p cls s 
-		(* get meth from object*)
-		val meth = 
-		  (case option_meth
-		  	 of NONE => raise Halt "No such method"
-		  	  | (SOME v) => v)
-		val {meth_name = meth_name, meth_args = arg_list, meth_body = body} = meth
-		
-		(* get arguments from method*)
-		val same_length =
-		  (case (length r_vs = length arg_list)
-		  	 of true => true
-		  	  | false => raise Fail "Wrong number of arguments") 
-		(* bind object to self*)
-		val A' = empty_A ()
-		val () = update A' ("self", r_loc)
-		val args = ListPair.zipEq (arg_list, r_vs)
-		(*adds arguments to env A *)
-		val () = List.app (fn x => update A' x) args 
-		val value = 
-		  (case (eval p (A', H, body))
-		  	 of (_, _, v) => v)
+
+		fun non_built_in option_meth l = 
+			let val meth = extract_option option_meth "No such method"
+				val {meth_name = _, meth_args = arg_list, meth_body = body} = meth
+
+				(* bind object to self*)
+				val A' = empty_A ()
+				val () = update A' ("self", (RLOC l))
+				val args = ListPair.zipEq (arg_list, r_vs)
+				(*adds arguments to env A *)
+				val () = List.app (fn x => update A' x) args 
+
+				val value = 
+		  	  	  (case (eval p (A', H, body))
+		  	     	 of (_, _, v) => v)
+		  	in value
+		  	end
+
+    	fun invoke_meth l =
+    		let val option_object = lookup l H (* returns an object *)	
+			val object = extract_option option_object "Object not bound in H"
+
+			val {class = cls, fields = _} = object (* get cls name from object*)
+
+			val option_meth = lookup_meth p cls s 
+			  (* get meth from object*)
+			val value = case option_meth
+			  			  of NONE => built_in rv s r_vs
+			   			   | (SOME m) => non_built_in option_meth l
+			in value
+			end
+
+    	val value = 
+    	  (case rv
+    	  	 of (RLOC n) => invoke_meth n
+    	  	  | _ => built_in rv s r_vs)
+    	
 	in (A, H, value)
 	end
 
-(* Evaluate built methods*)
-fun built_in (receiver, meth, args)
-  	(* Special built ins*)
-	case (receiver, meth, args)
-	  of (RINT n, "+", [RINT m]) => RINT (n+m)
-	   | (RINT n, "+", _) => raise Halt "non-Integer passed as argument"
-	   | (RSTR s, "+", [RSTR s']) => RSTR (s ^ s')
-	   | (RSTR s, "+", _) => raise Halt "non-String passed as argument"
-	   | (RINT n, "-", [RINT m]) => RINT (n-m)
-	   | (RINT n, "-", _) => raise Halt "non-Integer passed as argument"
-	   | (RINT n, "*", [RINT m]) => RINT (n*m)
-	   | (RINT n, "*", _) => raise Halt "non-Integer passed as argument"
-	   | (RINT n, "/", [RINT m]) => RINT (n/m)
-	   | (RINT n, "/", _) => raise Halt "non-Integer passed as argument"
-	   | (_, _, _) => RNIL(*continue this *)
-
-(* Evaluate non built in method *)
-fun invoke_meth (location, rv, vs)
-	
-
 fun run (p:rube_prog):string = 
 	let val {prog_clss=cls, prog_main=e} = p
+
 		fun to_s(RNIL: rubevalue):string = "nil"
 		  | to_s(RINT n) = Int.toString n
 		  | to_s(RSTR s) = s
@@ -270,51 +276,3 @@ fun run (p:rube_prog):string =
 
  	in to_s v
 	end
-
-
-(*val A1 = ref [("x", ref 0), ("y", ref 1)]
-
-val test_meth1 = {meth_name = "D", meth_args = [], meth_body = (EInt 1)}
-val test_class1 = {cls_name = "A", cls_super = "Object", cls_meths = [test_meth1]}
-val p1 = {prog_clss= [test_class1], prog_main = ENil}
-
-val () = 
-    Unit.checkExpectWith String.toString
-    "testing run ENil"
-    (fn () => run p1)
-    "nil"
-
-val p2 = {prog_clss= [test_class1], prog_main = EInt 1}
-val () = 
-    Unit.checkExpectWith String.toString
-    "testing run EInt"
-    (fn () => run p2)
-    "1"
-
-val p3 = {prog_clss= [test_class1], prog_main = EString "string"}
-val () = 
-    Unit.checkExpectWith String.toString
-    "testing run EString"
-    (fn () => run p3)
-    "string"
-*)
-(* Testing: is defnied class*)
-(*val test_meth1 = {meth_name = "D", meth_args = [], meth_body = (EInt 1)}
-val test_meth2 = {meth_name = "E", meth_args = [], meth_body = (EInt 1)}
-val test_meth3 = {meth_name = "F", meth_args = [], meth_body = (EInt 1)}
-
-val test_class1 = {cls_name = "A", cls_super = "Object", cls_meths = [test_meth1]}
-val test_class2 = {cls_name = "B", cls_super = "Object", cls_meths = [test_meth2]}
-val test_class3 = {cls_name = "C", cls_super = "Object", cls_meths = [test_meth3]}
-val p = {prog_clss= [test_class1, test_class2, test_class3], prog_main = (EInt 1)}
-
-val () =
-    Unit.checkAssert "is defined class"
-    (fn () => defined_class p "C")
-val () =
-    Unit.checkAssert "is defined class"
-    (fn () => not (defined_class p "D"))
-*)
-
-(*Dont pattern match on mutable alists, use lookup and update*)
-val () = Unit.report () 
