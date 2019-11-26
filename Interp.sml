@@ -1,6 +1,6 @@
 (*Yes, we're violating our rules by opening Ast...it's okay... *)
 open Ast
-
+open Unparse
 type location = int
 type ('a, 'b) mutable_alist = ('a * 'b ref) list ref
 datatype rubevalue = 
@@ -45,8 +45,8 @@ fun lookup_meth (p:rube_prog) (c:string) (m:string):meth option =
 		fun convert NONE = raise Fail "Undefined program class"
 		  | convert (SOME x) = x
 		
-		fun meth_list NONE m = [] (* get list of methods from a class*)
-		  | meth_list (SOME x) m = (#cls_meths x)
+		fun meth_list NONE m = [] (* get methods list from class*)
+		  | meth_list (SOME x) m = #cls_meths x
 
 		fun super_meth [] m = NONE
 		  | super_meth (x::xs) m = 
@@ -54,7 +54,7 @@ fun lookup_meth (p:rube_prog) (c:string) (m:string):meth option =
 		  		SOME x
 		  	else
 		  		super_meth xs m
-		 (* NONE case we need to look in superclass, find desired method in list of methods *)
+		 (* NONE case: try to find method in superclass *)
 		fun meth [] m = super_meth (meth_list (get_class (#prog_clss p) (#cls_super (convert (get_class (#prog_clss p) c)))) m) m 
 		  | meth (x::xs) m = 
 		  	if (#meth_name x) = m then
@@ -104,13 +104,23 @@ fun read_location option_location =
   (case option_location
   	 of NONE => raise Halt "self not bound in A"
 	  | (SOME (RLOC n)) => n
-	  | (SOME _) => raise Halt "expects self to be RLOC") 
+	  | (SOME _) => raise Halt "Expects self to be RLOC") 
 
 fun equal x y =
-	case (x = y)
+	case x = y
 	  of true => RINT 1
 	  | false => RNIL
-		
+
+fun printvar x =
+ 	let val p = 
+  	  	  (case x
+  	         of RNIL => print "nil"
+  	          | (RINT n) => print (Int.toString n)
+  	          | (RSTR s) => print s
+  	          | (RLOC n) => print "Undefined behavior") 
+	in RNIL
+	end 
+
 fun eval p (A, H, ENil) = (A, H, RNIL)
   | eval p (A, H, EInt n) = (A, H, RINT n)
   | eval p (A, H, ESelf) = (A, H, extract_option (lookup "self" A) "Self not bound in A")
@@ -129,7 +139,7 @@ fun eval p (A, H, ENil) = (A, H, RNIL)
 	end
 
   | eval p (A, H, EFldRd s) = 
-	let val option_location = lookup "self" A
+  	let val option_location = lookup "self" A
 		val location = read_location option_location
 		  	  
 		val option_object = lookup location H
@@ -145,7 +155,7 @@ fun eval p (A, H, ENil) = (A, H, RNIL)
 	end 
 
   | eval p (A, H, EFldWr (s, e)) = 
-  	let val option_location = lookup "self" A
+    let val option_location = lookup "self" A
   		val location = read_location option_location
 
   		val option_object = lookup location H
@@ -163,8 +173,8 @@ fun eval p (A, H, ENil) = (A, H, RNIL)
   		val rv = rubeval guard
   		val evaluate =
   		  (case rv
-  		  	 of RNIL => eval p (A, H, e2)
-  		  	  | _ => eval p (A, H, e3))
+  		  	 of RNIL => eval p (A, H, e3)
+  		  	  | _ => eval p (A, H, e2))
   	in evaluate
   	end
 
@@ -174,20 +184,32 @@ fun eval p (A, H, ENil) = (A, H, RNIL)
     in v2
     end
 
-  | eval p (A, H, ENew s) =
+  | eval p (A, H, ENew s) = (* If class is String or Integer then we need special handling*)
   	let val has_class = 
   		  (case s
   		  	 of "nil" => raise Halt "Cannot instantiate Bot"
   		  	  | _ => defined_class p s)
 
-  		val l =
-  	      (case has_class
-  	      	 of true => fresh_location ()
-  	      	  | false => raise Halt "No such class C")
+  		fun instantiate_cls () = 
+  		  let val l = fresh_location ()
+  		  	  val new_cls = {class = s, fields = ref []}
+  		  	  val () = update H (l, new_cls) (*update H with (location, object)*)
+  		  	  val return = 
+  		  	    (case s
+  		  	       of "String" => RSTR ""
+  		  	        | "Integer" => RINT 0
+  		  	        | _ => RLOC l)
+  		  in return
+  		  end
+  		
+  		val rv =
+  	      (case (has_class, s)
+  	      	 of (true, _) => instantiate_cls ()
+  	      	  | (false, "String") => instantiate_cls ()
+  	      	  | (false, "Integer") => instantiate_cls ()
+  	      	  | (false, _) => raise Halt ("No such class " ^ s))
 
-  	    val new_cls = {class = s, fields = ref []}
-  	    val () = update H (l, new_cls) (*update H with (location, object)*)
-  	in (A, H, (RLOC l))
+  	in (A, H, rv)
   	end
 
   | eval p (A, H, EInvoke (e, s, es)) =
@@ -195,46 +217,51 @@ fun eval p (A, H, ENil) = (A, H, RNIL)
     	val vs = List.map (fn x => eval p (A, H, x)) es
     	val r_vs = List.map (fn x => rubeval x) vs
     	
-		(* Evaluate built methods*)
+		(* Evaluate built in methods*)
 		fun built_in receiver meth args =
 			let val value = 
 		  	  (case (receiver, meth, args)
 	  		 	 of (RINT n, "+", [RINT m]) => RINT (n+m)
-	   		  	  | (RINT n, "+", _) => raise Halt "non-Integer passed as argument"
+	   		  	  | (RINT n, "+", _) => raise Halt "Non-Integer passed as argument"
 	   		  	  | (RSTR s, "+", [RSTR s']) => RSTR (s ^ s')
-	   		  	  | (RSTR s, "+", _) => raise Halt "non-String passed as argument"
+	   		  	  | (RSTR s, "+", _) => raise Halt "Non-String passed as argument"
 	   		  	  | (RINT n, "-", [RINT m]) => RINT (n-m)
-	   		  	  | (RINT n, "-", _) => raise Halt "non-Integer passed as argument"
+	   		  	  | (RINT n, "-", _) => raise Halt "Non-Integer passed as argument"
 	   		  	  | (RINT n, "*", [RINT m]) => RINT (n*m)
-	   		  	  | (RINT n, "*", _) => raise Halt "non-Integer passed as argument"
+	   		  	  | (RINT n, "*", _) => raise Halt "Non-Integer passed as argument"
 	   		  	  | (RINT n, "/", [RINT m]) => RINT (n div m)
-	   		  	  | (RINT n, "/", _) => raise Halt "non-Integer passed as argument"
+	   		  	  | (RINT n, "/", _) => raise Halt "Non-Integer passed as argument"
 	   		  	  | (RINT n, "equal?", [RINT m]) => equal n m
-		  	  	  | (RLOC n, "equal?", [RLOC m]) => equal n m
 		  	  	  | (RSTR n, "equal?", [RSTR m]) => equal n m
-		  	  	  | (_, "equal?", _) => RNIL
-		  	  	  (* | (RSTR s, "to_s", []) => s
-		  	  	  | (RINT n, "to_s", []) => Int.toString n
-		  	  	  | (RNIL, "to_s", []) => "nil"
-		  	  	  | (RLOC n, "to_s", []) => raise Halt "Cannot stringify Object" *)
-		  	  	  | (_, _, _) => raise Halt "No such method") (* general dynamic dispatch case *)
+		  	  	  | (RNIL, "equal?", [RNIL]) => equal RNIL RNIL
+		  	  	  | (RLOC n, "equal?", [RLOC m]) => equal n m
+		  	  	  | (RINT n, "equal?", _) => RNIL
+		  	  	  | (RSTR n, "equal?", _) => RNIL
+		  	  	  | (RSTR s, "to_s", []) => RSTR s
+		  	  	  | (RINT n, "to_s", []) => RSTR (Int.toString n)
+		  	  	  | (RNIL, "to_s", []) => RNIL
+		  	  	  | (RNIL, "print", []) => printvar RNIL
+		  	  	  | (RSTR s, "print", []) => printvar (RSTR s)
+		  	  	  | (RINT n, "print", []) => printvar (RINT n)
+		  	  	  | (RSTR s, "length", []) => RINT (size s)
+		  	  	  | (_, _, _) => raise Halt "No such method") 
 			in value
 			end
 
 
-		fun non_built_in option_meth l = 
-			let val meth = extract_option option_meth "No such method"
+		fun non_built_in m l = 
+			let val meth = extract_option m "No such method"
 				val {meth_name = _, meth_args = arg_list, meth_body = body} = meth
 
 				(* bind object to self*)
 				val A' = empty_A ()
-				val () = update A' ("self", (RLOC l))
+				val () = update A' ("self", RLOC l)
 				val args = ListPair.zipEq (arg_list, r_vs)
 				(*adds arguments to env A *)
 				val () = List.app (fn x => update A' x) args 
 
 				val value = 
-		  	  	  (case (eval p (A', H, body))
+		  	  	  (case eval p (A', H, body)
 		  	     	 of (_, _, v) => v)
 		  	in value
 		  	end
@@ -246,7 +273,7 @@ fun eval p (A, H, ENil) = (A, H, RNIL)
 			val {class = cls, fields = _} = object (* get cls name from object*)
 
 			val option_meth = lookup_meth p cls s 
-			  (* get meth from object*)
+			(* get meth from object*)
 			val value = case option_meth
 			  			  of NONE => built_in rv s r_vs
 			   			   | (SOME m) => non_built_in option_meth l
@@ -272,7 +299,12 @@ fun run (p:rube_prog):string =
 		val A = empty_A ()
 		val H = empty_H ()
 
-		val (A', H', v) = eval p (A, H, e)
+		val l = fresh_location ()
+  		val new_cls = {class = "Object", fields = ref []}
+  		val () = update H (l, new_cls)
+  		val () = update A ("self", RLOC l)
 
+		val (A', H', v) = eval p (A, H, e)
+		
  	in to_s v
 	end
